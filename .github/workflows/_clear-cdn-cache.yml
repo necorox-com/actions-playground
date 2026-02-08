@@ -1,0 +1,71 @@
+# -----------------------------------------------
+# _clear-cdn-cache - CDNキャッシュ削除ワークフロー
+#
+# 前提:
+#   - Secret: CLOUDFLARE_ZONE_ID
+#   - Secret: CLOUDFLARE_API_TOKEN
+#   - Secret: PIPELINE_GITHUB_TOKEN (通知用)
+#   - Secret: GOOGLE_CHAT_WEBHOOK_URL (通知用)
+#
+# 使い方:
+#   repository_dispatch 経由でチェーンから呼び出される
+#   workflow_dispatch で単体テストも可能
+# -----------------------------------------------
+name: CDNキャッシュ削除
+
+on:
+  repository_dispatch:
+    types: [clear-cdn-cache]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-pipeline
+  cancel-in-progress: false
+
+jobs:
+  clear-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: パラメータを決定
+        id: params
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CP_TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          if [ "${EVENT_NAME}" = "repository_dispatch" ]; then
+            CONTEXT='${{ toJSON(github.event.client_payload) }}'
+            TAG="${CP_TAG}"
+          else
+            CONTEXT='{}'
+            TAG='(手動実行)'
+          fi
+          echo "context=${CONTEXT}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: CDNキャッシュを削除
+        id: clear-cache
+        continue-on-error: true
+        uses: ./.github/actions/clear-cdn-cache
+        with:
+          cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: 結果を通知 (パイプライン完了)
+        if: always()
+        uses: ./.github/actions/notify-chat
+        with:
+          webhook_url: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+          status: ${{ steps.clear-cache.outcome == 'success' && 'success' || 'failure' }}
+          title: ${{ steps.clear-cache.outcome == 'success' && 'パイプライン完了' || 'CDNキャッシュ削除失敗' }}
+          message: >-
+            ${{ steps.clear-cache.outcome == 'success'
+              && format('CDNキャッシュを削除しました。デプロイパイプライン完了 (タグ: {0})', steps.params.outputs.tag)
+              || format('CDNキャッシュの削除に失敗しました (タグ: {0})。手動でCloudflareのキャッシュをパージしてください', steps.params.outputs.tag) }}
+          github_token: ${{ secrets.PIPELINE_GITHUB_TOKEN }}

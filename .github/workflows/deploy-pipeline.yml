@@ -1,0 +1,106 @@
+# -----------------------------------------------
+# deploy-pipeline - デプロイパイプライン入口
+#
+# repository_dispatch チェーン方式でデプロイを実行する。
+# タグ作成 → Chat通知 → デプロイ → Chat通知 → CDNキャッシュ削除 → Chat通知
+#
+# 前提:
+#   - Secret: PIPELINE_GITHUB_TOKEN (Classic PAT, repo スコープ)
+#   - Secret: GOOGLE_CHAT_WEBHOOK_URL
+#   - Secret: CLOUDFLARE_API_TOKEN
+#   - Secret: CLOUDFLARE_ZONE_ID
+#   - セルフホストランナー (ラベル: self-hosted, deploy)
+#   - デプロイ先にリポジトリが git clone 済み
+#   - 詳細: docs/github_actions/deploy-pipeline.md
+#
+# 使い方:
+#   1. workflow_dispatch で手動実行 (branch, deploy_dir を指定)
+#   2. 指定ブランチへの push で自動実行
+#      ※ブランチパターンは利用者がカスタマイズしてください
+# -----------------------------------------------
+name: デプロイパイプライン
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'デプロイ対象ブランチ'
+        required: false
+        type: string
+        default: 'main'
+      deploy_dir:
+        description: 'デプロイ先ディレクトリ (例: /var/www/app)'
+        required: true
+        type: string
+  # ※ push トリガーのブランチは利用者がカスタマイズしてください
+  # push:
+  #   branches:
+  #     - main
+  #     - release/*
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy-pipeline
+  cancel-in-progress: false
+
+jobs:
+  start-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: パイプラインコンテキストを組み立て
+        id: context
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+          INPUT_DEPLOY_DIR: ${{ inputs.deploy_dir }}
+        run: |
+          # タグ名を自動生成
+          TAG="release-$(date -u +%Y%m%d-%H%M%S)-${GITHUB_RUN_NUMBER}"
+
+          # ブランチの決定
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            BRANCH="${INPUT_BRANCH}"
+            DEPLOY_DIR="${INPUT_DEPLOY_DIR}"
+          else
+            # push トリガーの場合はブランチ名を取得
+            BRANCH="${GITHUB_REF_NAME}"
+            # push トリガー時の deploy_dir は環境変数やデフォルト値を使用
+            # 利用者が自身の環境に合わせて設定してください
+            DEPLOY_DIR="${DEFAULT_DEPLOY_DIR:-/var/www/app}"
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "deploy_dir=${DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
+
+          # jq で安全に payload を構築
+          PAYLOAD=$(jq -n \
+            --arg tag "${TAG}" \
+            --arg branch "${BRANCH}" \
+            --arg deploy_dir "${DEPLOY_DIR}" \
+            --arg pipeline_id "run-${GITHUB_RUN_ID}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            '{tag: $tag, branch: $branch, deploy_dir: $deploy_dir, pipeline_id: $pipeline_id, repository: $repository}')
+          echo "payload=${PAYLOAD}" >> "$GITHUB_OUTPUT"
+
+          echo "パイプライン開始"
+          echo "  タグ: ${TAG}"
+          echo "  ブランチ: ${BRANCH}"
+          echo "  デプロイ先: ${DEPLOY_DIR}"
+
+      - name: パイプライン開始を通知 → タグ作成へ
+        uses: ./.github/actions/notify-chat
+        with:
+          webhook_url: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+          status: info
+          title: パイプライン開始
+          message: "デプロイパイプラインを開始します (ブランチ: ${{ steps.context.outputs.branch }}, タグ: ${{ steps.context.outputs.tag }})"
+          next_event: create-tag
+          payload: ${{ steps.context.outputs.payload }}
+          github_token: ${{ secrets.PIPELINE_GITHUB_TOKEN }}

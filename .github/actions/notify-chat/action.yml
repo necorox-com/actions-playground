@@ -1,0 +1,192 @@
+# -----------------------------------------------
+# notify-chat - Google Chat Card V2 通知 + 次アクション連鎖
+#
+# 前提:
+#   - Google Chat Webhook URL
+#   - repository_dispatch を使う場合: Classic PAT (repo スコープ)
+#
+# 使い方:
+#   - uses: ./.github/actions/notify-chat
+#     with:
+#       webhook_url: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+#       status: success
+#       title: デプロイ完了
+#       message: タグ release-xxx を反映しました
+#       next_event: clear-cdn-cache        # optional
+#       payload: '{"tag":"release-xxx"}'   # optional
+#       github_token: ${{ secrets.PIPELINE_GITHUB_TOKEN }}
+# -----------------------------------------------
+name: 'Google Chat通知 + 次アクション連鎖'
+description: 'Google Chat Card V2で通知を送信し、オプションでrepository_dispatchで次のワークフローをトリガーする'
+
+inputs:
+  webhook_url:
+    description: 'Google Chat Webhook URL (空の場合はChat通知をスキップ)'
+    required: false
+    default: ''
+  status:
+    description: '通知ステータス (success / failure / info)'
+    required: true
+    default: 'info'
+  title:
+    description: 'カードのタイトル'
+    required: true
+  message:
+    description: 'メッセージ本文'
+    required: true
+  run_url:
+    description: 'GitHub Actions Run URL (未指定時は自動取得)'
+    required: false
+    default: ''
+  next_event:
+    description: '次にトリガーするrepository_dispatch event_type (空ならパイプライン終了)'
+    required: false
+    default: ''
+  payload:
+    description: '次のワークフローに渡すJSON payload'
+    required: false
+    default: '{}'
+  github_token:
+    description: 'repository_dispatch発火用トークン (next_event使用時は必須)'
+    required: false
+    default: ''
+  repository:
+    description: 'dispatch先リポジトリ (owner/repo形式、未指定時は現在のリポジトリ)'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: ステータス情報を設定
+      id: status-info
+      shell: bash
+      run: |
+        case "${{ inputs.status }}" in
+          success)
+            echo "icon=✓" >> "$GITHUB_OUTPUT"
+            echo "color=#2e7d32" >> "$GITHUB_OUTPUT"
+            echo "image_url=https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/check_circle/default/48px.svg" >> "$GITHUB_OUTPUT"
+            ;;
+          failure)
+            echo "icon=✗" >> "$GITHUB_OUTPUT"
+            echo "color=#c62828" >> "$GITHUB_OUTPUT"
+            echo "image_url=https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/error/default/48px.svg" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "icon=ℹ" >> "$GITHUB_OUTPUT"
+            echo "color=#1565c0" >> "$GITHUB_OUTPUT"
+            echo "image_url=https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/info/default/48px.svg" >> "$GITHUB_OUTPUT"
+            ;;
+        esac
+
+    - name: Run URLを決定
+      id: run-url
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.run_url }}" ]; then
+          echo "url=${{ inputs.run_url }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Google Chat Card V2を送信
+      shell: bash
+      env:
+        WEBHOOK_URL: ${{ inputs.webhook_url }}
+        CARD_TITLE: ${{ inputs.title }}
+        CARD_MESSAGE: ${{ inputs.message }}
+        CARD_ICON: ${{ steps.status-info.outputs.icon }}
+        CARD_COLOR: ${{ steps.status-info.outputs.color }}
+        CARD_IMAGE_URL: ${{ steps.status-info.outputs.image_url }}
+        RUN_URL: ${{ steps.run-url.outputs.url }}
+      run: |
+        # Webhook URL 未設定チェック
+        if [ -z "${WEBHOOK_URL}" ]; then
+          echo "::warning::GOOGLE_CHAT_WEBHOOK_URL が未設定のため、Chat通知をスキップします"
+          exit 0
+        fi
+
+        TIMESTAMP="$(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+
+        # jq で安全に Card V2 JSON を組み立て
+        CARD_JSON=$(jq -n \
+          --arg title "${CARD_ICON} ${CARD_TITLE}" \
+          --arg subtitle "${TIMESTAMP}" \
+          --arg imageUrl "${CARD_IMAGE_URL}" \
+          --arg message "${CARD_MESSAGE}" \
+          --arg runUrl "${RUN_URL}" \
+          '{
+            cardsV2: [{
+              cardId: "pipeline-notification",
+              card: {
+                header: {
+                  title: $title,
+                  subtitle: $subtitle,
+                  imageUrl: $imageUrl,
+                  imageType: "CIRCLE"
+                },
+                sections: [{
+                  widgets: [
+                    { textParagraph: { text: $message } },
+                    { buttonList: { buttons: [{ text: "GitHub Actions Run", onClick: { openLink: { url: $runUrl } } }] } }
+                  ]
+                }]
+              }
+            }]
+          }')
+
+        # Google Chat に送信
+        HTTP_STATUS=$(curl -s -o /tmp/chat_response.txt -w "%{http_code}" \
+          -X POST \
+          -H "Content-Type: application/json; charset=UTF-8" \
+          -d "${CARD_JSON}" \
+          "${WEBHOOK_URL}")
+
+        if [ "${HTTP_STATUS}" -lt 200 ] || [ "${HTTP_STATUS}" -ge 300 ]; then
+          echo "::warning::Google Chat通知に失敗しました (HTTP ${HTTP_STATUS})。パイプラインは継続します"
+          cat /tmp/chat_response.txt
+        else
+          echo "Google Chat通知を送信しました (HTTP ${HTTP_STATUS})"
+        fi
+
+    - name: 次のアクションをトリガー
+      if: inputs.next_event != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        NEXT_EVENT: ${{ inputs.next_event }}
+        PAYLOAD: ${{ inputs.payload }}
+        TARGET_REPO: ${{ inputs.repository }}
+      run: |
+        if [ -z "${GITHUB_TOKEN}" ]; then
+          echo "::warning::PIPELINE_GITHUB_TOKEN が未設定のため、次のアクション (${NEXT_EVENT}) をトリガーできません"
+          echo "::warning::パイプラインチェーンがここで停止します。手動で次のワークフローを実行してください"
+          exit 0
+        fi
+
+        REPO="${TARGET_REPO:-${GITHUB_REPOSITORY}}"
+
+        echo "repository_dispatch を発火: event_type=${NEXT_EVENT}, repo=${REPO}"
+
+        # jq で安全に dispatch ペイロードを構築
+        DISPATCH_PAYLOAD=$(jq -n \
+          --arg event_type "${NEXT_EVENT}" \
+          --argjson client_payload "${PAYLOAD}" \
+          '{event_type: $event_type, client_payload: $client_payload}')
+
+        HTTP_STATUS=$(curl -s -o /tmp/dispatch_response.txt -w "%{http_code}" \
+          -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "https://api.github.com/repos/${REPO}/dispatches" \
+          -d "${DISPATCH_PAYLOAD}")
+
+        if [ "${HTTP_STATUS}" -ne 204 ]; then
+          echo "::warning::repository_dispatch の発火に失敗しました (HTTP ${HTTP_STATUS})"
+          echo "::warning::PIPELINE_GITHUB_TOKEN の権限を確認してください (Classic PAT, repo スコープが必要)"
+          cat /tmp/dispatch_response.txt
+        else
+          echo "repository_dispatch を発火しました: ${NEXT_EVENT}"
+        fi
