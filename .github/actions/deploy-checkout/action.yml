@@ -1,0 +1,136 @@
+# -----------------------------------------------
+# deploy-checkout - 指定ディレクトリでタグを fetch + checkout
+#
+# 前提:
+#   - セルフホストランナー上で実行
+#   - deploy_dir に対象リポジトリが git clone 済み
+#   - ランナーユーザーが deploy_dir への読み書き権限を持つ
+#
+# 使い方:
+#   - uses: ./.github/actions/deploy-checkout
+#     with:
+#       tag_name: release-20260208-143052-42
+#       deploy_dir: /var/www/app
+# -----------------------------------------------
+name: 'デプロイ (git checkout)'
+description: '指定ディレクトリでタグをfetch+checkoutする。失敗時は前のタグにロールバック。'
+
+inputs:
+  tag_name:
+    description: 'チェックアウトするタグ名'
+    required: true
+  deploy_dir:
+    description: 'デプロイ先ディレクトリパス'
+    required: true
+
+outputs:
+  success:
+    description: 'デプロイ成功かどうか (true/false)'
+    value: ${{ steps.deploy.outputs.success }}
+  previous_ref:
+    description: 'チェックアウト前のref'
+    value: ${{ steps.deploy.outputs.previous_ref }}
+  rollback:
+    description: 'ロールバックしたかどうか (true/false)'
+    value: ${{ steps.deploy.outputs.rollback }}
+  rollback_tag:
+    description: 'ロールバック先のタグ名'
+    value: ${{ steps.deploy.outputs.rollback_tag }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: デプロイ実行
+      id: deploy
+      shell: bash
+      env:
+        TAG_NAME: ${{ inputs.tag_name }}
+        DEPLOY_DIR: ${{ inputs.deploy_dir }}
+      run: |
+        set +e
+
+        # デプロイディレクトリの存在確認
+        if [ ! -d "${DEPLOY_DIR}" ]; then
+          echo "::error::デプロイディレクトリが存在しません: ${DEPLOY_DIR}"
+          echo "success=false" >> "$GITHUB_OUTPUT"
+          echo "rollback=false" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        cd "${DEPLOY_DIR}" || exit 1
+
+        # gitリポジトリか確認
+        if [ ! -d ".git" ]; then
+          echo "::error::${DEPLOY_DIR} はgitリポジトリではありません"
+          echo "success=false" >> "$GITHUB_OUTPUT"
+          echo "rollback=false" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        # 現在のHEADを記録
+        PREVIOUS_REF=$(git describe --tags --always 2>/dev/null || git rev-parse --short HEAD)
+        echo "previous_ref=${PREVIOUS_REF}" >> "$GITHUB_OUTPUT"
+        echo "現在のref: ${PREVIOUS_REF}"
+
+        # タグをfetch
+        echo "タグをfetch中..."
+        git fetch origin --tags --force
+        FETCH_RESULT=$?
+        if [ ${FETCH_RESULT} -ne 0 ]; then
+          echo "::error::git fetch に失敗しました (exit code: ${FETCH_RESULT})"
+          echo "success=false" >> "$GITHUB_OUTPUT"
+          echo "rollback=false" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        # 対象タグの存在確認
+        if ! git tag -l "${TAG_NAME}" | grep -q "^${TAG_NAME}$"; then
+          echo "::error::タグ ${TAG_NAME} が見つかりません"
+          echo "success=false" >> "$GITHUB_OUTPUT"
+          echo "rollback=false" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        # checkout実行
+        echo "タグ ${TAG_NAME} をチェックアウト中..."
+        git checkout "tags/${TAG_NAME}" 2>&1
+        CHECKOUT_RESULT=$?
+
+        if [ ${CHECKOUT_RESULT} -eq 0 ]; then
+          echo "デプロイ成功: ${TAG_NAME}"
+          echo "success=true" >> "$GITHUB_OUTPUT"
+          echo "rollback=false" >> "$GITHUB_OUTPUT"
+          echo "rollback_tag=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # checkout失敗 → ロールバック
+        echo "::warning::checkout失敗 (exit code: ${CHECKOUT_RESULT})。ロールバックを試みます..."
+
+        # 前のrelease-*タグを取得（日付降順でソートし、現在のタグの1つ前）
+        PREVIOUS_TAG=$(git tag -l "release-*" --sort=-version:refname | grep -v "^${TAG_NAME}$" | head -n 1)
+
+        if [ -n "${PREVIOUS_TAG}" ]; then
+          echo "ロールバック先: ${PREVIOUS_TAG}"
+          git checkout "tags/${PREVIOUS_TAG}" 2>&1
+          ROLLBACK_RESULT=$?
+
+          if [ ${ROLLBACK_RESULT} -eq 0 ]; then
+            echo "ロールバック成功: ${PREVIOUS_TAG}"
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            echo "rollback=true" >> "$GITHUB_OUTPUT"
+            echo "rollback_tag=${PREVIOUS_TAG}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::ロールバックにも失敗しました"
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            echo "rollback=false" >> "$GITHUB_OUTPUT"
+            echo "rollback_tag=" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          echo "::warning::ロールバック可能なrelease-*タグが見つかりません"
+          echo "success=false" >> "$GITHUB_OUTPUT"
+          echo "rollback=false" >> "$GITHUB_OUTPUT"
+          echo "rollback_tag=" >> "$GITHUB_OUTPUT"
+        fi
+
+        exit 1

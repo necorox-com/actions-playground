@@ -1,0 +1,61 @@
+# -----------------------------------------------
+# create-tag - ブランチの最新コミットにタグを作成・プッシュ
+#
+# 前提:
+#   - contents: write 権限
+#   - リポジトリが checkout 済み
+#
+# 使い方:
+#   - uses: ./.github/actions/create-tag
+#     with:
+#       tag_name: release-20260208-143052-42
+#       branch: main
+# -----------------------------------------------
+name: 'タグ作成'
+description: 'ブランチの最新コミットにタグを作成してプッシュする'
+
+inputs:
+  tag_name:
+    description: '作成するタグ名'
+    required: true
+  branch:
+    description: 'タグを作成するブランチ'
+    required: true
+    default: 'main'
+
+outputs:
+  tag_name:
+    description: '作成されたタグ名'
+    value: ${{ inputs.tag_name }}
+  commit_sha:
+    description: 'タグが指すコミットSHA'
+    value: ${{ steps.create.outputs.commit_sha }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: タグを作成してプッシュ
+      id: create
+      shell: bash
+      env:
+        TAG_NAME: ${{ inputs.tag_name }}
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        # 対象ブランチの最新を取得
+        git fetch origin "${BRANCH}"
+        git checkout "${BRANCH}"
+
+        COMMIT_SHA=$(git rev-parse HEAD)
+        echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+        echo "ブランチ ${BRANCH} の最新コミット: ${COMMIT_SHA}"
+
+        # タグが既に存在するか確認
+        if git tag -l "${TAG_NAME}" | grep -q "^${TAG_NAME}$"; then
+          echo "::error::タグ ${TAG_NAME} は既に存在します"
+          exit 1
+        fi
+
+        # タグを作成してプッシュ
+        git tag "${TAG_NAME}" "${COMMIT_SHA}"
+        git push origin "refs/tags/${TAG_NAME}"
+        echo "タグ ${TAG_NAME} を作成しました (${COMMIT_SHA})"

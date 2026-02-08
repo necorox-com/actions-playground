@@ -1,0 +1,115 @@
+# -----------------------------------------------
+# _deploy-checkout - デプロイワークフロー (セルフホストランナー)
+#
+# 前提:
+#   - セルフホストランナー (ラベル: self-hosted, deploy) がVPS上にセットアップ済み
+#   - デプロイ先ディレクトリに対象リポジトリが git clone 済み
+#   - Secret: PIPELINE_GITHUB_TOKEN, GOOGLE_CHAT_WEBHOOK_URL
+#
+# 使い方:
+#   repository_dispatch 経由でチェーンから呼び出される
+#   workflow_dispatch で単体テストも可能
+# -----------------------------------------------
+name: デプロイ
+
+on:
+  repository_dispatch:
+    types: [deploy-checkout]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'チェックアウトするタグ名'
+        required: true
+        type: string
+      deploy_dir:
+        description: 'デプロイ先ディレクトリ'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-pipeline
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, deploy]
+    steps:
+      - name: リポジトリをチェックアウト (アクション参照用)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: パラメータを決定
+        id: params
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CP_TAG: ${{ github.event.client_payload.tag }}
+          CP_DEPLOY_DIR: ${{ github.event.client_payload.deploy_dir }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+          INPUT_DEPLOY_DIR: ${{ inputs.deploy_dir }}
+        run: |
+          if [ "${EVENT_NAME}" = "repository_dispatch" ]; then
+            echo "tag=${CP_TAG}" >> "$GITHUB_OUTPUT"
+            echo "deploy_dir=${CP_DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
+
+            CONTEXT='${{ toJSON(github.event.client_payload) }}'
+            echo "context=${CONTEXT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+            echo "deploy_dir=${INPUT_DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
+
+            CONTEXT=$(jq -n \
+              --arg tag "${INPUT_TAG}" \
+              --arg deploy_dir "${INPUT_DEPLOY_DIR}" \
+              --arg pipeline_id "run-${GITHUB_RUN_ID}" \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              '{tag: $tag, branch: "", deploy_dir: $deploy_dir, pipeline_id: $pipeline_id, repository: $repository}')
+            echo "context=${CONTEXT}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: デプロイ実行
+        id: deploy
+        continue-on-error: true
+        uses: ./.github/actions/deploy-checkout
+        with:
+          tag_name: ${{ steps.params.outputs.tag }}
+          deploy_dir: ${{ steps.params.outputs.deploy_dir }}
+
+      - name: デプロイ結果メッセージを組み立て
+        id: deploy-result
+        if: always()
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.deploy.outcome }}
+          TAG: ${{ steps.params.outputs.tag }}
+          DEPLOY_DIR: ${{ steps.params.outputs.deploy_dir }}
+          ROLLBACK: ${{ steps.deploy.outputs.rollback }}
+          ROLLBACK_TAG: ${{ steps.deploy.outputs.rollback_tag }}
+        run: |
+          if [ "${OUTCOME}" = "success" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "title=デプロイ完了" >> "$GITHUB_OUTPUT"
+            echo "message=タグ ${TAG} を ${DEPLOY_DIR} にデプロイしました" >> "$GITHUB_OUTPUT"
+          elif [ "${ROLLBACK}" = "true" ]; then
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "title=デプロイ失敗 (ロールバック済み)" >> "$GITHUB_OUTPUT"
+            echo "message=タグ ${TAG} のデプロイに失敗しました。${ROLLBACK_TAG} にロールバックしました" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "title=デプロイ失敗" >> "$GITHUB_OUTPUT"
+            echo "message=タグ ${TAG} のデプロイに失敗しました。手動対応が必要です" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 結果を通知 → 次ステップへ
+        if: always()
+        uses: ./.github/actions/notify-chat
+        with:
+          webhook_url: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+          status: ${{ steps.deploy-result.outputs.status }}
+          title: ${{ steps.deploy-result.outputs.title }}
+          message: ${{ steps.deploy-result.outputs.message }}
+          next_event: clear-cdn-cache
+          payload: ${{ steps.params.outputs.context }}
+          github_token: ${{ secrets.PIPELINE_GITHUB_TOKEN }}
