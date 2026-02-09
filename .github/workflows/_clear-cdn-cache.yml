@@ -2,10 +2,9 @@
 # _clear-cdn-cache - CDNキャッシュ削除ワークフロー
 #
 # 前提:
-#   - Secret: CLOUDFLARE_ZONE_ID
-#   - Secret: CLOUDFLARE_API_TOKEN
-#   - Secret: PIPELINE_GITHUB_TOKEN (通知用)
-#   - Secret: GOOGLE_CHAT_WEBHOOK_URL (通知用)
+#   Cloudflare: Secret: CLOUDFLARE_ZONE_ID, CLOUDFLARE_API_TOKEN
+#   AWS:        Secret: CLOUDFRONT_DISTRIBUTION_ID, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+#   共通:       Secret: PIPELINE_GITHUB_TOKEN, GOOGLE_CHAT_WEBHOOK_URL
 #
 # 使い方:
 #   repository_dispatch 経由でチェーンから呼び出される
@@ -16,7 +15,21 @@ name: CDNキャッシュ削除
 on:
   repository_dispatch:
     types: [clear-cdn-cache]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: 'CDNプロバイダ'
+        required: true
+        type: choice
+        options:
+          - cloudflare
+          - aws
+        default: cloudflare
+      invalidation_paths:
+        description: 'キャッシュ無効化するパス (AWS CloudFront用、デフォルト: /*)'
+        required: false
+        type: string
+        default: '/*'
 
 permissions:
   contents: read
@@ -38,24 +51,42 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           CP_TAG: ${{ github.event.client_payload.tag }}
+          CP_CDN_PROVIDER: ${{ github.event.client_payload.cdn_provider }}
+          CP_INVALIDATION_PATHS: ${{ github.event.client_payload.invalidation_paths }}
+          INPUT_PROVIDER: ${{ inputs.provider }}
+          INPUT_INVALIDATION_PATHS: ${{ inputs.invalidation_paths }}
         run: |
           if [ "${EVENT_NAME}" = "repository_dispatch" ]; then
             CONTEXT='${{ toJSON(github.event.client_payload) }}'
             TAG="${CP_TAG}"
+            PROVIDER="${CP_CDN_PROVIDER:-cloudflare}"
+            PATHS="${CP_INVALIDATION_PATHS:-/*}"
           else
             CONTEXT='{}'
             TAG='(手動実行)'
+            PROVIDER="${INPUT_PROVIDER:-cloudflare}"
+            PATHS="${INPUT_INVALIDATION_PATHS:-/*}"
           fi
           echo "context=${CONTEXT}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "provider=${PROVIDER}" >> "$GITHUB_OUTPUT"
+          echo "invalidation_paths=${PATHS}" >> "$GITHUB_OUTPUT"
 
       - name: CDNキャッシュを削除
         id: clear-cache
         continue-on-error: true
         uses: ./.github/actions/clear-cdn-cache
         with:
+          provider: ${{ steps.params.outputs.provider }}
+          # Cloudflare
           cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
           cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # AWS CloudFront
+          aws_distribution_id: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: ${{ secrets.AWS_REGION }}
+          invalidation_paths: ${{ steps.params.outputs.invalidation_paths }}
 
       - name: 結果を通知 (パイプライン完了)
         if: always()
@@ -66,6 +97,6 @@ jobs:
           title: ${{ steps.clear-cache.outcome == 'success' && 'パイプライン完了' || 'CDNキャッシュ削除失敗' }}
           message: >-
             ${{ steps.clear-cache.outcome == 'success'
-              && format('CDNキャッシュを削除しました。デプロイパイプライン完了 (タグ: {0})', steps.params.outputs.tag)
-              || format('CDNキャッシュの削除に失敗しました (タグ: {0})。手動でCloudflareのキャッシュをパージしてください', steps.params.outputs.tag) }}
+              && format('CDNキャッシュを削除しました ({0})。デプロイパイプライン完了 (タグ: {1})', steps.params.outputs.provider, steps.params.outputs.tag)
+              || format('CDNキャッシュの削除に失敗しました ({0}, タグ: {1})。手動でキャッシュをパージしてください', steps.params.outputs.provider, steps.params.outputs.tag) }}
           github_token: ${{ secrets.PIPELINE_GITHUB_TOKEN }}

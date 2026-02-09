@@ -1,80 +1,175 @@
 # -----------------------------------------------
-# clear-cdn-cache - Cloudflare CDNキャッシュ全パージ
+# clear-cdn-cache - CDNキャッシュ全パージ (Cloudflare / AWS CloudFront)
 #
 # 前提:
-#   - Cloudflare APIトークン (Zone.Cache Purge 権限)
-#   - Cloudflare Zone ID
+#   Cloudflare: APIトークン (Zone.Cache Purge 権限) + Zone ID
+#   AWS: IAM認証情報 + CloudFront Distribution ID
 #
 # 使い方:
+#   Cloudflare:
 #   - uses: ./.github/actions/clear-cdn-cache
 #     with:
+#       provider: cloudflare
 #       cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
 #       cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#
+#   AWS CloudFront:
+#   - uses: ./.github/actions/clear-cdn-cache
+#     with:
+#       provider: aws
+#       aws_distribution_id: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+#       aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#       aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#       aws_region: ap-northeast-1
+#       invalidation_paths: '/*'
 # -----------------------------------------------
 name: 'CDNキャッシュ削除'
-description: 'Cloudflare CDNキャッシュを全パージする'
+description: 'Cloudflare または AWS CloudFront のCDNキャッシュを全パージする'
 
 inputs:
+  provider:
+    description: 'CDNプロバイダ (cloudflare / aws)'
+    required: true
+    default: 'cloudflare'
+  # --- Cloudflare ---
   cloudflare_zone_id:
-    description: 'Cloudflare Zone ID (空の場合はスキップ)'
+    description: 'Cloudflare Zone ID (provider=cloudflare時に必要)'
     required: false
     default: ''
   cloudflare_api_token:
-    description: 'Cloudflare APIトークン (Zone.Cache Purge 権限、空の場合はスキップ)'
+    description: 'Cloudflare APIトークン (provider=cloudflare時に必要)'
     required: false
     default: ''
+  # --- AWS CloudFront ---
+  aws_distribution_id:
+    description: 'CloudFront Distribution ID (provider=aws時に必要)'
+    required: false
+    default: ''
+  aws_access_key_id:
+    description: 'AWS Access Key ID (provider=aws時に必要)'
+    required: false
+    default: ''
+  aws_secret_access_key:
+    description: 'AWS Secret Access Key (provider=aws時に必要)'
+    required: false
+    default: ''
+  aws_region:
+    description: 'AWSリージョン (default: us-east-1)'
+    required: false
+    default: 'us-east-1'
+  invalidation_paths:
+    description: 'キャッシュ無効化するパス (default: /*)'
+    required: false
+    default: '/*'
 
 outputs:
   success:
-    description: 'キャッシュパージ成功かどうか (true/false)'
+    description: 'キャッシュパージ成功かどうか (true/false/skipped)'
     value: ${{ steps.purge.outputs.success }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Cloudflareキャッシュをパージ
+    - name: CDNキャッシュをパージ
       id: purge
       shell: bash
       env:
-        ZONE_ID: ${{ inputs.cloudflare_zone_id }}
-        API_TOKEN: ${{ inputs.cloudflare_api_token }}
+        PROVIDER: ${{ inputs.provider }}
+        # Cloudflare
+        CF_ZONE_ID: ${{ inputs.cloudflare_zone_id }}
+        CF_API_TOKEN: ${{ inputs.cloudflare_api_token }}
+        # AWS
+        AWS_DISTRIBUTION_ID: ${{ inputs.aws_distribution_id }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        INVALIDATION_PATHS: ${{ inputs.invalidation_paths }}
       run: |
-        # 未設定チェック
-        MISSING=""
-        if [ -z "${ZONE_ID}" ]; then
-          MISSING="${MISSING}  - CLOUDFLARE_ZONE_ID が未設定です\n"
-        fi
-        if [ -z "${API_TOKEN}" ]; then
-          MISSING="${MISSING}  - CLOUDFLARE_API_TOKEN が未設定です\n"
-        fi
+        case "${PROVIDER}" in
+          cloudflare)
+            # --- Cloudflare ---
+            MISSING=""
+            if [ -z "${CF_ZONE_ID}" ]; then
+              MISSING="${MISSING}  - CLOUDFLARE_ZONE_ID が未設定です\n"
+            fi
+            if [ -z "${CF_API_TOKEN}" ]; then
+              MISSING="${MISSING}  - CLOUDFLARE_API_TOKEN が未設定です\n"
+            fi
+            if [ -n "${MISSING}" ]; then
+              echo "::warning::Cloudflare キャッシュ削除をスキップします（以下のSecretsが未設定）:"
+              echo -e "${MISSING}"
+              echo "success=skipped" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
 
-        if [ -n "${MISSING}" ]; then
-          echo "::warning::CDNキャッシュ削除をスキップします（以下のSecretsが未設定）:"
-          echo -e "${MISSING}"
-          echo "success=skipped" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
+            echo "Cloudflare CDNキャッシュを全パージ中..."
+            RESPONSE=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d '{"purge_everything":true}' \
+              "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache")
 
-        echo "Cloudflare CDNキャッシュを全パージ中..."
+            HTTP_STATUS=$(echo "${RESPONSE}" | tail -n 1)
+            BODY=$(echo "${RESPONSE}" | head -n -1)
+            SUCCESS=$(echo "${BODY}" | jq -r '.success // false')
 
-        RESPONSE=$(curl -s -w "\n%{http_code}" \
-          -X POST \
-          -H "Authorization: Bearer ${API_TOKEN}" \
-          -H "Content-Type: application/json" \
-          -d '{"purge_everything":true}' \
-          "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/purge_cache")
+            if [ "${SUCCESS}" = "true" ] && [ "${HTTP_STATUS}" -ge 200 ] && [ "${HTTP_STATUS}" -lt 300 ]; then
+              echo "Cloudflare CDNキャッシュのパージに成功しました"
+              echo "success=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::Cloudflare CDNキャッシュのパージに失敗しました (HTTP ${HTTP_STATUS})。パイプラインは継続します"
+              echo "${BODY}"
+              echo "success=false" >> "$GITHUB_OUTPUT"
+            fi
+            ;;
 
-        HTTP_STATUS=$(echo "${RESPONSE}" | tail -n 1)
-        BODY=$(echo "${RESPONSE}" | head -n -1)
+          aws)
+            # --- AWS CloudFront ---
+            MISSING=""
+            if [ -z "${AWS_DISTRIBUTION_ID}" ]; then
+              MISSING="${MISSING}  - CLOUDFRONT_DISTRIBUTION_ID が未設定です\n"
+            fi
+            if [ -z "${AWS_ACCESS_KEY_ID}" ]; then
+              MISSING="${MISSING}  - AWS_ACCESS_KEY_ID が未設定です\n"
+            fi
+            if [ -z "${AWS_SECRET_ACCESS_KEY}" ]; then
+              MISSING="${MISSING}  - AWS_SECRET_ACCESS_KEY が未設定です\n"
+            fi
+            if [ -n "${MISSING}" ]; then
+              echo "::warning::AWS CloudFront キャッシュ削除をスキップします（以下のSecretsが未設定）:"
+              echo -e "${MISSING}"
+              echo "success=skipped" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
 
-        # レスポンスの success フィールドを確認
-        SUCCESS=$(echo "${BODY}" | jq -r '.success // false')
+            echo "AWS CloudFront キャッシュを無効化中 (Distribution: ${AWS_DISTRIBUTION_ID})..."
+            echo "  パス: ${INVALIDATION_PATHS}"
 
-        if [ "${SUCCESS}" = "true" ] && [ "${HTTP_STATUS}" -ge 200 ] && [ "${HTTP_STATUS}" -lt 300 ]; then
-          echo "CDNキャッシュのパージに成功しました"
-          echo "success=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "::warning::CDNキャッシュのパージに失敗しました (HTTP ${HTTP_STATUS})。パイプラインは継続します"
-          echo "${BODY}"
-          echo "success=false" >> "$GITHUB_OUTPUT"
-        fi
+            # パスをスペース区切りからJSON配列に変換
+            PATHS_JSON=$(echo "${INVALIDATION_PATHS}" | tr ' ' '\n' | jq -R . | jq -s '.')
+            PATHS_COUNT=$(echo "${PATHS_JSON}" | jq 'length')
+            CALLER_REF="deploy-pipeline-$(date -u +%Y%m%d%H%M%S)-${GITHUB_RUN_ID:-manual}"
+
+            RESULT=$(aws cloudfront create-invalidation \
+              --distribution-id "${AWS_DISTRIBUTION_ID}" \
+              --invalidation-batch "{\"Paths\":{\"Quantity\":${PATHS_COUNT},\"Items\":$(echo "${PATHS_JSON}")},\"CallerReference\":\"${CALLER_REF}\"}" \
+              2>&1) || true
+
+            INVALIDATION_ID=$(echo "${RESULT}" | jq -r '.Invalidation.Id // empty' 2>/dev/null)
+
+            if [ -n "${INVALIDATION_ID}" ]; then
+              echo "CloudFront キャッシュ無効化を作成しました (ID: ${INVALIDATION_ID})"
+              echo "success=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::CloudFront キャッシュ無効化に失敗しました。パイプラインは継続します"
+              echo "${RESULT}"
+              echo "success=false" >> "$GITHUB_OUTPUT"
+            fi
+            ;;
+
+          *)
+            echo "::warning::未知のCDNプロバイダ: ${PROVIDER} (cloudflare または aws を指定してください)"
+            echo "success=skipped" >> "$GITHUB_OUTPUT"
+            ;;
+        esac
