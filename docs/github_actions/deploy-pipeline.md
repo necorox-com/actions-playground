@@ -20,7 +20,7 @@ _deploy-checkout (self-hosted runner @ VPS)
   │   → repository_dispatch: clear-cdn-cache
   ▼
 _clear-cdn-cache (GitHub-hosted runner)
-  │ Cloudflare CDNキャッシュ全パージ
+  │ CDNキャッシュ全パージ (Cloudflare or AWS CloudFront)
   │ → notify-chat: 「パイプライン完了」(終了)
 ```
 
@@ -34,8 +34,12 @@ _clear-cdn-cache (GitHub-hosted runner)
 |----------|------|---------|
 | `PIPELINE_GITHUB_TOKEN` | repository_dispatch 発火用 Personal Access Token | [PAT作成手順](#pat-の作成) |
 | `GOOGLE_CHAT_WEBHOOK_URL` | Google Chat の Incoming Webhook URL | [Webhook設定手順](#google-chat-webhook-の設定) |
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API トークン | [APIトークン作成手順](#cloudflare-api-トークンの作成) |
-| `CLOUDFLARE_ZONE_ID` | 対象サイトの Cloudflare Zone ID | [Zone ID取得方法](#cloudflare-zone-id-の取得) |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API トークン (Cloudflare利用時) | [APIトークン作成手順](#cloudflare-api-トークンの作成) |
+| `CLOUDFLARE_ZONE_ID` | 対象サイトの Cloudflare Zone ID (Cloudflare利用時) | [Zone ID取得方法](#cloudflare-zone-id-の取得) |
+| `CLOUDFRONT_DISTRIBUTION_ID` | CloudFront Distribution ID (AWS利用時) | [Distribution ID取得方法](#aws-cloudfront-の設定) |
+| `AWS_ACCESS_KEY_ID` | AWS IAM Access Key ID (AWS利用時) | [IAM設定手順](#aws-cloudfront-の設定) |
+| `AWS_SECRET_ACCESS_KEY` | AWS IAM Secret Access Key (AWS利用時) | [IAM設定手順](#aws-cloudfront-の設定) |
+| `AWS_REGION` | AWSリージョン (AWS利用時、任意) | デフォルト: `us-east-1` |
 
 ### 2. セルフホストランナーのセットアップ
 
@@ -134,6 +138,45 @@ on:
 2. 右サイドバーの「API」セクションに Zone ID が表示される
 3. リポジトリの Secret `CLOUDFLARE_ZONE_ID` に設定
 
+### AWS CloudFront の設定
+
+#### IAM ユーザー / ロールの作成
+
+最小権限のIAMポリシーを作成:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "cloudfront:CreateInvalidation",
+      "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/<DISTRIBUTION_ID>"
+    }
+  ]
+}
+```
+
+1. AWS コンソール → IAM → Users → Create user
+2. ユーザー名: `deploy-pipeline-cloudfront`
+3. 上記ポリシーをアタッチ
+4. Security credentials → Create access key → 「Third-party service」を選択
+5. Access Key ID と Secret Access Key をコピー
+6. リポジトリの Secret に設定:
+   - `AWS_ACCESS_KEY_ID`
+   - `AWS_SECRET_ACCESS_KEY`
+
+#### Distribution ID の取得
+
+1. AWS コンソール → CloudFront → Distributions
+2. 対象ディストリビューションの ID をコピー（例: `E1A2B3C4D5E6F7`）
+3. リポジトリの Secret `CLOUDFRONT_DISTRIBUTION_ID` に設定
+
+#### リージョンの設定（任意）
+
+CloudFront API はグローバルサービスのため `us-east-1` がデフォルトで動作します。
+変更する場合はリポジトリの Secret `AWS_REGION` に設定してください。
+
 ---
 
 ## 使い方
@@ -205,8 +248,15 @@ on:
 - Webhook URL が有効か確認（スペースからWebhookが削除されていないか）
 - Secretの値にスペースや改行が含まれていないか確認
 
-### CDNキャッシュ削除が失敗する
+### CDNキャッシュ削除が失敗する (Cloudflare)
 
 - API トークンの権限確認（Zone.Cache Purge）
 - Zone ID が正しいか確認
 - API トークンの有効期限を確認
+
+### CDNキャッシュ削除が失敗する (AWS CloudFront)
+
+- IAM ユーザーに `cloudfront:CreateInvalidation` 権限があるか確認
+- Distribution ID が正しいか確認
+- Access Key が有効か確認（無効化・削除されていないか）
+- リージョンの設定確認（デフォルト: `us-east-1`）
