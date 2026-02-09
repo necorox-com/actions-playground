@@ -19,14 +19,15 @@ _deploy-checkout (self-hosted runner @ VPS)
   │ → notify-chat: 「デプロイ完了」or「デプロイ失敗」
   │   → repository_dispatch: clear-cdn-cache
   ▼
-_clear-cdn-cache (GitHub-hosted runner)
+_clear-cdn-cache (GitHub-hosted runner, Environment: 選択サイト)
   │ CDNキャッシュ全パージ (Cloudflare or AWS CloudFront)
+  │ プロバイダ・認証情報は Environment から取得
   │ → notify-chat: 「パイプライン完了」(終了)
 ```
 
 ## セットアップ手順
 
-### 1. Secrets の設定
+### 1. リポジトリ共通 Secrets の設定
 
 リポジトリの Settings → Secrets and variables → Actions で以下を設定:
 
@@ -34,14 +35,56 @@ _clear-cdn-cache (GitHub-hosted runner)
 |----------|------|---------|
 | `PIPELINE_GITHUB_TOKEN` | repository_dispatch 発火用 Personal Access Token | [PAT作成手順](#pat-の作成) |
 | `GOOGLE_CHAT_WEBHOOK_URL` | Google Chat の Incoming Webhook URL | [Webhook設定手順](#google-chat-webhook-の設定) |
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API トークン (Cloudflare利用時) | [APIトークン作成手順](#cloudflare-api-トークンの作成) |
-| `CLOUDFLARE_ZONE_ID` | 対象サイトの Cloudflare Zone ID (Cloudflare利用時) | [Zone ID取得方法](#cloudflare-zone-id-の取得) |
-| `CLOUDFRONT_DISTRIBUTION_ID` | CloudFront Distribution ID (AWS利用時) | [Distribution ID取得方法](#aws-cloudfront-の設定) |
-| `AWS_ACCESS_KEY_ID` | AWS IAM Access Key ID (AWS利用時) | [IAM設定手順](#aws-cloudfront-の設定) |
-| `AWS_SECRET_ACCESS_KEY` | AWS IAM Secret Access Key (AWS利用時) | [IAM設定手順](#aws-cloudfront-の設定) |
-| `AWS_REGION` | AWSリージョン (AWS利用時、任意) | デフォルト: `us-east-1` |
 
-### 2. セルフホストランナーのセットアップ
+### 2. Environment (サイト) の設定
+
+サイトごとに GitHub Environment を作成し、CDN設定を登録する。
+手動実行時はドロップダウンからサイトを選択でき、パイプライン経由時は `cdn_environment` パラメータで指定される。
+
+#### Environment の作成
+
+1. リポジトリの Settings → Environments → New environment
+2. Environment 名を入力（例: `production-site-a`, `staging-site-b`）
+3. 以下の Variable と Secret を設定
+
+#### Environment Variable
+
+| Variable名 | 説明 | 値 |
+|------------|------|-----|
+| `CDN_PROVIDER` | CDNプロバイダ | `cloudflare` または `aws` |
+
+#### Environment Secret (Cloudflare の場合)
+
+| Secret名 | 説明 | 取得方法 |
+|----------|------|---------|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API トークン | [APIトークン作成手順](#cloudflare-api-トークンの作成) |
+| `CLOUDFLARE_ZONE_ID` | 対象サイトの Cloudflare Zone ID | [Zone ID取得方法](#cloudflare-zone-id-の取得) |
+
+#### Environment Secret (AWS CloudFront の場合)
+
+| Secret名 | 説明 | 取得方法 |
+|----------|------|---------|
+| `CLOUDFRONT_DISTRIBUTION_ID` | CloudFront Distribution ID | [Distribution ID取得方法](#aws-cloudfront-の設定) |
+| `AWS_ACCESS_KEY_ID` | AWS IAM Access Key ID | [IAM設定手順](#aws-cloudfront-の設定) |
+| `AWS_SECRET_ACCESS_KEY` | AWS IAM Secret Access Key | [IAM設定手順](#aws-cloudfront-の設定) |
+| `AWS_REGION` | AWSリージョン（任意） | デフォルト: `us-east-1` |
+
+#### 設定例
+
+```
+Environment: production-site-a
+  Variable: CDN_PROVIDER = cloudflare
+  Secret:   CLOUDFLARE_ZONE_ID = xxxxxxxx
+  Secret:   CLOUDFLARE_API_TOKEN = xxxxxxxx
+
+Environment: production-site-b
+  Variable: CDN_PROVIDER = aws
+  Secret:   CLOUDFRONT_DISTRIBUTION_ID = E1A2B3C4D5E6F7
+  Secret:   AWS_ACCESS_KEY_ID = AKIAxxxxxxxx
+  Secret:   AWS_SECRET_ACCESS_KEY = xxxxxxxx
+```
+
+### 3. セルフホストランナーのセットアップ
 
 デプロイ先の VPS に GitHub Actions self-hosted runner をインストールする。
 
@@ -82,7 +125,7 @@ git clone https://github.com/<owner>/<repo>.git /var/www/app
 sudo chown -R <runner-user>:<runner-group> /var/www/app
 ```
 
-### 3. pushトリガーの設定（任意）
+### 4. pushトリガーの設定（任意）
 
 `deploy-pipeline.yml` の push トリガーを有効にする場合は、コメントを解除してブランチパターンを設定:
 
@@ -188,6 +231,7 @@ CloudFront API はグローバルサービスのため `us-east-1` がデフォ�
 3. パラメータを入力:
    - **branch**: デプロイ対象ブランチ（デフォルト: `main`）
    - **deploy_dir**: デプロイ先ディレクトリ（例: `/var/www/app`）
+   - **cdn_environment**: CDNキャッシュ削除対象サイト（Environment名を選択）
 4. 「Run workflow」で実行
 
 ### 個別ステップの実行
@@ -197,7 +241,7 @@ CloudFront API はグローバルサービスのため `us-east-1` がデフォ�
 - **タグ作成のみ**: Actions → 「タグ作成」→ Run workflow
 - **Chat通知のテスト**: Actions → 「Chat通知」→ Run workflow
 - **デプロイのみ**: Actions → 「デプロイ」→ Run workflow
-- **キャッシュ削除のみ**: Actions → 「CDNキャッシュ削除」→ Run workflow
+- **キャッシュ削除のみ**: Actions → 「CDNキャッシュ削除」→ Run workflow（サイトを選択）
 
 ---
 

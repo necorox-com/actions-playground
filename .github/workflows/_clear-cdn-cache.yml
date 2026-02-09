@@ -1,14 +1,21 @@
 # -----------------------------------------------
 # _clear-cdn-cache - CDNキャッシュ削除ワークフロー
 #
+# GitHub Environments を使ってサイトごとにCDN設定を管理する。
+# 手動実行時はドロップダウンからサイト(Environment)を選択する。
+#
 # 前提:
-#   Cloudflare: Secret: CLOUDFLARE_ZONE_ID, CLOUDFLARE_API_TOKEN
-#   AWS:        Secret: CLOUDFRONT_DISTRIBUTION_ID, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
-#   共通:       Secret: PIPELINE_GITHUB_TOKEN, GOOGLE_CHAT_WEBHOOK_URL
+#   各 Environment に以下を設定:
+#     Variable: CDN_PROVIDER (cloudflare / aws)
+#     Cloudflare: Secret: CLOUDFLARE_ZONE_ID, CLOUDFLARE_API_TOKEN
+#     AWS:        Secret: CLOUDFRONT_DISTRIBUTION_ID, AWS_ACCESS_KEY_ID,
+#                         AWS_SECRET_ACCESS_KEY, AWS_REGION (任意)
+#   共通 (リポジトリレベル):
+#     Secret: PIPELINE_GITHUB_TOKEN, GOOGLE_CHAT_WEBHOOK_URL
 #
 # 使い方:
 #   repository_dispatch 経由でチェーンから呼び出される
-#   workflow_dispatch で単体テストも可能
+#   workflow_dispatch で単体テストも可能 (サイトを選択)
 # -----------------------------------------------
 name: CDNキャッシュ削除
 
@@ -17,14 +24,10 @@ on:
     types: [clear-cdn-cache]
   workflow_dispatch:
     inputs:
-      provider:
-        description: 'CDNプロバイダ'
+      site:
+        description: 'サイト (Environment名)'
         required: true
-        type: choice
-        options:
-          - cloudflare
-          - aws
-        default: cloudflare
+        type: environment
       invalidation_paths:
         description: 'キャッシュ無効化するパス (AWS CloudFront用、デフォルト: /*)'
         required: false
@@ -41,6 +44,7 @@ concurrency:
 jobs:
   clear-cache:
     runs-on: ubuntu-latest
+    environment: ${{ inputs.site || github.event.client_payload.cdn_environment }}
     steps:
       - name: リポジトリをチェックアウト
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -51,20 +55,19 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           CP_TAG: ${{ github.event.client_payload.tag }}
-          CP_CDN_PROVIDER: ${{ github.event.client_payload.cdn_provider }}
           CP_INVALIDATION_PATHS: ${{ github.event.client_payload.invalidation_paths }}
-          INPUT_PROVIDER: ${{ inputs.provider }}
           INPUT_INVALIDATION_PATHS: ${{ inputs.invalidation_paths }}
+          CDN_PROVIDER: ${{ vars.CDN_PROVIDER }}
         run: |
+          PROVIDER="${CDN_PROVIDER:-cloudflare}"
+
           if [ "${EVENT_NAME}" = "repository_dispatch" ]; then
             CONTEXT='${{ toJSON(github.event.client_payload) }}'
             TAG="${CP_TAG}"
-            PROVIDER="${CP_CDN_PROVIDER:-cloudflare}"
             PATHS="${CP_INVALIDATION_PATHS:-/*}"
           else
             CONTEXT='{}'
             TAG='(手動実行)'
-            PROVIDER="${INPUT_PROVIDER:-cloudflare}"
             PATHS="${INPUT_INVALIDATION_PATHS:-/*}"
           fi
           echo "context=${CONTEXT}" >> "$GITHUB_OUTPUT"
