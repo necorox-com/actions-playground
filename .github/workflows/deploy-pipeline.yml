@@ -7,8 +7,8 @@
 # 前提:
 #   - Secret: PIPELINE_GITHUB_TOKEN (Classic PAT, repo スコープ)
 #   - Secret: GOOGLE_CHAT_WEBHOOK_URL
-#   - Cloudflare: Secret: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID
-#   - AWS:        Secret: CLOUDFRONT_DISTRIBUTION_ID, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+#   - CDN: Environment ごとに CDN_PROVIDER 変数と各プロバイダのSecretを設定
+#          (詳細は docs/github_actions/deploy-pipeline.md を参照)
 #   - セルフホストランナー (ラベル: self-hosted, deploy)
 #   - デプロイ先にリポジトリが git clone 済み
 #   - 詳細: docs/github_actions/deploy-pipeline.md
@@ -32,14 +32,10 @@ on:
         description: 'デプロイ先ディレクトリ (例: /var/www/app)'
         required: true
         type: string
-      cdn_provider:
-        description: 'CDNプロバイダ (cloudflare / aws)'
+      cdn_environment:
+        description: 'CDNキャッシュ削除対象サイト (Environment名)'
         required: false
-        type: choice
-        options:
-          - cloudflare
-          - aws
-        default: 'cloudflare'
+        type: environment
   # ※ push トリガーのブランチは利用者がカスタマイズしてください
   # push:
   #   branches:
@@ -67,7 +63,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_BRANCH: ${{ inputs.branch }}
           INPUT_DEPLOY_DIR: ${{ inputs.deploy_dir }}
-          INPUT_CDN_PROVIDER: ${{ inputs.cdn_provider }}
+          INPUT_CDN_ENVIRONMENT: ${{ inputs.cdn_environment }}
         run: |
           # タグ名を自動生成
           TAG="release-$(date -u +%Y%m%d-%H%M%S)-${GITHUB_RUN_NUMBER}"
@@ -76,14 +72,14 @@ jobs:
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             BRANCH="${INPUT_BRANCH}"
             DEPLOY_DIR="${INPUT_DEPLOY_DIR}"
-            CDN_PROVIDER="${INPUT_CDN_PROVIDER:-cloudflare}"
+            CDN_ENVIRONMENT="${INPUT_CDN_ENVIRONMENT}"
           else
             # push トリガーの場合はブランチ名を取得
             BRANCH="${GITHUB_REF_NAME}"
             # push トリガー時は環境変数やデフォルト値を使用
             # 利用者が自身の環境に合わせて設定してください
             DEPLOY_DIR="${DEFAULT_DEPLOY_DIR:-/var/www/app}"
-            CDN_PROVIDER="${DEFAULT_CDN_PROVIDER:-cloudflare}"
+            CDN_ENVIRONMENT="${DEFAULT_CDN_ENVIRONMENT:-}"
           fi
 
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
@@ -95,10 +91,10 @@ jobs:
             --arg tag "${TAG}" \
             --arg branch "${BRANCH}" \
             --arg deploy_dir "${DEPLOY_DIR}" \
-            --arg cdn_provider "${CDN_PROVIDER}" \
+            --arg cdn_environment "${CDN_ENVIRONMENT}" \
             --arg pipeline_id "run-${GITHUB_RUN_ID}" \
             --arg repository "${GITHUB_REPOSITORY}" \
-            '{tag: $tag, branch: $branch, deploy_dir: $deploy_dir, cdn_provider: $cdn_provider, pipeline_id: $pipeline_id, repository: $repository}')
+            '{tag: $tag, branch: $branch, deploy_dir: $deploy_dir, cdn_environment: $cdn_environment, pipeline_id: $pipeline_id, repository: $repository}')
           echo "payload=${PAYLOAD}" >> "$GITHUB_OUTPUT"
 
           echo "パイプライン開始"
